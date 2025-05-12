@@ -99,4 +99,4 @@ with DAG(
         python_callable=data_to_hive,
         provide_context=True,)
 
-    load_data
+    load_data_to_hive
