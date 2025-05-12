@@ -1,0 +1,102 @@
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+from datetime import datetime, timedelta
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, to_date, current_date, lit, to_timestamp, regexp_replace, date_add
+from pyspark.sql.types import IntegerType, StringType, TimestampType
+
+default_args = {
+    "owner": "Mixanik",
+    "depends_on_past": False,
+    "retries": 2,
+    'start_date':datetime(2024, 10, 1),
+    'end_date':datetime(2025, 2, 1),#тестовые данные для проверки работоспособности, для дальнейшей отработки стоит оставить только старт дейт.
+    "retry_delay": timedelta(minutes=2)
+}
+
+def spark_session():
+    spark = SparkSession.builder \
+        .appName("SparkHiveExample") \
+        .enableHiveSupport() \
+        .getOrCreate()
+    return spark
+
+
+def data_to_hive(ti, **context):
+    data_interval_start = context['data_interval_start'].strftime('%Y-%m-%d')
+    print(data_interval_start)
+    data_interval_end = context['data_interval_end'].strftime('%Y-%m-%d')
+    print(data_interval_end)
+    spark = spark_session()
+    path_to_file='/user/spark/1'
+
+    nashville_df = (spark.read.csv(path_to_file, header=True, inferSchema=True))
+    nashville_df = nashville_df.withColumn("Date and Time",regexp_replace(col("Date and Time"), ",\s*", ""))
+    nashville_df = nashville_df.withColumn("Date and Time", to_timestamp(col("Date and Time"), "M/d/yyyy h:mm:ss a"))
+    nashville_df = nashville_df.filter(col("Date and Time").between(lit(data_interval_start), date_add(lit(data_interval_end), -1)))
+    rename_map = {
+        "Accident Number": "AccidentNumber",
+        "Street Address": "StreetAddress",
+        "x": "Xcoordinate",
+        "y": "Ycoordinate",
+        "Zip code": "Zip_code",
+        "Weather Description": "WeatherDescription",
+        "Illumination Description": "IlluminationDescription",
+        "Collision Type": "CollisionType",
+        "Reporting Officer": "ReportingOfficer",
+        "Collision Type Description": "CollisionTypeDescription",
+        "Hit and Run": "Hit_and_Run",
+        "Property Damage": "PropertyDamage",
+        "Date and Time": "Date_and_Time",
+        "Number of Motor Vehicles": "Motors",
+        "Number of Injuries": "Injuries",
+        "Number of Fatalities": "Fatalities"
+    }
+    for old_col, new_col in rename_map.items():
+        nashville_df = nashville_df.withColumnRenamed(old_col, new_col)
+
+
+    nashville_df = nashville_df.withColumn("AccidentNumber", col("AccidentNumber").cast(IntegerType()))
+
+
+    accident_info_columns = ["AccidentNumber", "Date_and_Time", "Hit_and_Run", "Motors",
+        "Injuries", "Fatalities", "PropertyDamage",
+        "CollisionTypeDescription", "HarmfulDescriptions", "CollisionType", "ReportingOfficer", "RPA"]
+
+
+    location_columns =["AccidentNumber", "StreetAddress", "City", "State",
+                       "Precinct", "Lat", "Long", "Xcoordinate", "Ycoordinate",
+                       "Zip_code", "ObjectId"]
+
+    factors_columns = ["AccidentNumber", "WeatherDescription", "IlluminationDescription",
+                    "Weather", "IlluACCIDEmination"]
+
+
+    nashville_df.select(*accident_info_columns).write.format("hive").mode('append').saveAsTable("nashville.accident_info")
+    nashville_df.select(*location_columns).write.format("hive").mode('append').saveAsTable("nashville.location")
+    nashville_df.select(*factors_columns).write.format("hive").mode('append').saveAsTable("nashville.factores")
+
+    result = spark.sql("SELECT COUNT(*) FROM nashville.accident_info")
+    result.show()
+
+    ti.xcom_push(key="data_to_hive", value=f"hive insert {nashville_df.count()} successfully")
+
+def use_connection():
+    conn = PostgresHook.get_connection("crazy_db")
+    print(
+        f"Host: {conn.host}, Login: {conn.login}, Password: {conn.password}, Port: {conn.port}"
+    )
+with DAG(
+    "data_from_csv_to_psql",
+    default_args=default_args,
+    description="DAG from csv to PostgreSQL",
+    schedule_interval='@monthly',
+    catchup=True,
+) as dag:
+
+    load_data_to_hive = PythonOperator(
+        task_id="data_to_hive",
+        python_callable=data_to_hive,
+        provide_context=True,)
+
+    load_data
