@@ -4,19 +4,21 @@ from datetime import datetime, timedelta
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, to_date, current_date, lit, to_timestamp, regexp_replace, date_add
 from pyspark.sql.types import IntegerType, StringType, TimestampType
+from airflow.hooks.postgres_hook import PostgresHook
 
 default_args = {
     "owner": "Mixanik",
     "depends_on_past": False,
-    "retries": 2,
-    'start_date':datetime(2024, 10, 1),
-    'end_date':datetime(2025, 2, 1),#тестовые данные для проверки работоспособности, для дальнейшей отработки стоит оставить только старт дейт.
+    "retries": 1,
+    'start_date':datetime(2024, 10, 1),#тестовые данные для проверки работоспособности, можно оставить только старт дейт + поставить catchup=False
+    'end_date':datetime(2025, 2, 1),
     "retry_delay": timedelta(minutes=2)
 }
 
 def spark_session():
     spark = SparkSession.builder \
         .appName("SparkHiveExample") \
+        .config("spark.jars", "/path/to/postgresql-42.7.2.jar")\
         .enableHiveSupport() \
         .getOrCreate()
     return spark
@@ -82,10 +84,30 @@ def data_to_hive(ti, **context):
     ti.xcom_push(key="data_to_hive", value=f"hive insert {nashville_df.count()} successfully")
 
 def use_connection():
-    conn = PostgresHook.get_connection("crazy_db")
+    conn = PostgresHook.get_connection("hm3_db")
     print(
         f"Host: {conn.host}, Login: {conn.login}, Password: {conn.password}, Port: {conn.port}"
     )
+    ti.xcom_push(key="connection_status", value="Success")
+def from_hive_to_postgre(ti,**context):
+    data_interval_start = context['data_interval_start'].strftime('%Y-%m-%d')
+    print(data_interval_start)
+    data_interval_end = context['data_interval_end'].strftime('%Y-%m-%d')
+    print(data_interval_end)
+    spark = spark_session()
+
+    accident_info_df = spark.sql("SELECT * FROM nashville.accident_info ").filter(col("Date_and_Time").between(lit(data_interval_start), date_add(lit(data_interval_end), -1)))
+    location_df = spark.sql("SELECT * FROM nashville.location").filter(col("Date_and_Time").between(lit(data_interval_start), date_add(lit(data_interval_end), -1)))
+    factors_df = spark.sql("SELECT * FROM nashville.factors").filter(col("Date_and_Time").between(lit(data_interval_start), date_add(lit(data_interval_end), -1)))
+
+    accident_info_df.write.jdbc(url="jdbc:postgresql://158.160.173.243:5432/hm3", table="accident_info", mode="overwrite",
+                       properties={"user": "admin", "password": "admin", "driver":"org.postgresql.Driver"})
+    location_df.write.jdbc(url="jdbc:postgresql://158.160.173.243:5432/hm3", table="location", mode="overwrite",
+                                properties={"user": "admin", "password": "admin", "driver":"org.postgresql.Driver"})
+    factors_df.write.jdbc(url="jdbc:postgresql://158.160.173.243:5432/hm3", table="factors", mode="overwrite",
+                                properties={"user": "admin", "password": "admin", "driver":"org.postgresql.Driver"})
+
+    ti.xcom_push(key="load_status", value="Success")
 with DAG(
     "data_from_csv_to_psql",
     default_args=default_args,
@@ -97,6 +119,21 @@ with DAG(
     load_data_to_hive = PythonOperator(
         task_id="data_to_hive",
         python_callable=data_to_hive,
-        provide_context=True,)
+        provide_context=True
+    )
 
-    load_data_to_hive
+    conn_to_postgre=PythonOperator(
+        task_id="postgre_connection",
+        python_callable=use_connection,
+        provide_context=True
+    )
+
+    from_hive_to_postgre = PythonOperator(
+        task_id="from_hive_to_postgre",
+        python_callable=from_hive_to_postgre,
+        provide_context=True
+    )
+
+
+
+    load_data_to_hive >> conn_to_postgre >> from_hive_to_postgre
