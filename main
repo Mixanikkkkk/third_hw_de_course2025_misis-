@@ -83,7 +83,7 @@ def data_to_hive(ti, **context):
 
     ti.xcom_push(key="data_to_hive", value=f"hive insert {nashville_df.count()} successfully")
 
-def use_connection():
+def use_connection(ti, **context):
     conn = PostgresHook.get_connection("hm3_db")
     print(
         f"Host: {conn.host}, Login: {conn.login}, Password: {conn.password}, Port: {conn.port}"
